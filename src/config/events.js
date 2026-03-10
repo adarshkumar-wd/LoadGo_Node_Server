@@ -16,6 +16,7 @@ module.exports = {
 
   // ─── Trip lifecycle (emitted to trip rooms) ─────────────────────────────────
   TRIP_ACCEPTED: "TRIP_ACCEPTED",
+  TRIP_STARTED: "TRIP_STARTED",
   TRIP_CANCELLED: "TRIP_CANCELLED",
   TRIP_COMPLETED: "TRIP_COMPLETED",
   TRIP_CLOSED_BY_USER: "TRIP_CLOSED_BY_USER",

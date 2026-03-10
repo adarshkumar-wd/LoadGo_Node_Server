@@ -55,22 +55,43 @@ router.post("/notify-new-trip", (req, res) => {
 // ─── POST /trip-status-update ─────────────────────────────────────────────────
 //
 // Called by PHP backend when a trip's status changes.
-// Handles: TRIP_ACCEPTED, TRIP_CANCELLED, TRIP_COMPLETED, TRIP_CLOSED_BY_USER,
-//          RIDE_REVOKED
+//
+// Status IDs (from PHP):
+//   1 = Requested       (not handled here — handled by /notify-new-trip)
+//   2 = Accepted
+//   3 = Revoked
+//   4 = Started         (driver started the trip / picked up passenger)
+//   5 = Completed
+//   6 = Cancelled By User
+//   7 = Cancelled By Driver
+//   8 = Request Timeout
+
+const STATUS = {
+  REQUESTED: 1,
+  ACCEPTED: 2,
+  REVOKED: 3,
+  STARTED: 4,
+  COMPLETED: 5,
+  CANCELLED_BY_USER: 6,
+  CANCELLED_BY_DRIVER: 7,
+  REQUEST_TIMEOUT: 8,
+};
 
 router.post("/trip-status-update", (req, res) => {
   const { io } = req.app.locals;
-  const { status, tripId, driverId, userId, by } = req.body;
+  const { status, tripId, driverId, userId } = req.body;
 
-  if (!status || !tripId) {
+  if (status === undefined || status === null || !tripId) {
     return sendError(res, 400, "status and tripId are required");
   }
 
-  log.info(`Trip status update: ${status} for trip ${tripId}`);
+  // Ensure status is a number (PHP may send it as string "2" or number 2)
+  const statusCode = Number(status);
 
-  switch (status) {
-    // ── TRIP_ACCEPTED ───────────────────────────────────────────────────────
-    case EVENTS.TRIP_ACCEPTED: {
+  log.info(`Trip status update: ${statusCode} for trip ${tripId}`);
+  switch (statusCode) {
+    // ── 2 = Accepted ────────────────────────────────────────────────────────
+    case 2: {
       // Join driver + user to the trip room for further communication
       connectionManager.joinDriverToTripRoom(io, driverId, tripId);
       connectionManager.joinUserToTripRoom(io, userId, tripId);
@@ -93,52 +114,9 @@ router.post("/trip-status-update", (req, res) => {
       break;
     }
 
-    // ── TRIP_CANCELLED ──────────────────────────────────────────────────────
-    case EVENTS.TRIP_CANCELLED: {
-      io.to(connectionManager.tripRoom(tripId)).emit(EVENTS.TRIP_CANCELLED, {
-        tripId,
-      });
-
-      if (by === "user") {
-        io.to(connectionManager.tripRoom(tripId)).emit(
-          EVENTS.RIDE_CANCEL_BY_USER,
-          { tripId }
-        );
-      }
-
-      if (by === "driver") {
-        io.to(connectionManager.tripRoom(tripId)).emit(
-          EVENTS.RIDE_CANCEL_BY_DRIVER,
-          { tripId }
-        );
-      }
-
-      break;
-    }
-
-    // ── TRIP_COMPLETED ──────────────────────────────────────────────────────
-    case EVENTS.TRIP_COMPLETED: {
-      io.to(connectionManager.tripRoom(tripId)).emit(EVENTS.TRIP_COMPLETED, {
-        tripId,
-      });
-
-      break;
-    }
-
-    // ── TRIP_CLOSED_BY_USER ─────────────────────────────────────────────────
-    case EVENTS.TRIP_CLOSED_BY_USER: {
-      // User cancelled their search — remove from all driver queues
-      driverQueue.removeTripFromAllDrivers(tripId);
-      offerManager.clearAllOffersForTrip(io, tripId);
-
-      io.emit(EVENTS.TRIP_CLOSED_BY_USER, { tripId });
-
-      break;
-    }
-
-    // ── RIDE_REVOKED ────────────────────────────────────────────────────────
-    case EVENTS.RIDE_REVOKED: {
-      // Trip revoked (timeout from user side) — remove from all queues
+    // ── 3 = Revoked ─────────────────────────────────────────────────────────
+    case STATUS.REVOKED: {
+      // Trip revoked by system — remove from all driver queues
       driverQueue.removeTripFromAllDrivers(tripId);
       offerManager.clearAllOffersForTrip(io, tripId);
 
@@ -147,9 +125,63 @@ router.post("/trip-status-update", (req, res) => {
       break;
     }
 
-    // ── UNKNOWN ─────────────────────────────────────────────────────────────
+    // ── 4 = Started (driver picked up passenger) ────────────────────────────
+    case STATUS.STARTED: {
+      io.to(connectionManager.tripRoom(tripId)).emit(EVENTS.TRIP_STARTED, {
+        tripId,
+        driverId,
+      });
+
+      break;
+    }
+
+    // ── 5 = Completed ───────────────────────────────────────────────────────
+    case STATUS.COMPLETED: {
+      io.to(connectionManager.tripRoom(tripId)).emit(EVENTS.TRIP_COMPLETED, {
+        tripId,
+      });
+
+      break;
+    }
+
+    // ── 6 = Cancelled By User ───────────────────────────────────────────────
+    case STATUS.CANCELLED_BY_USER: {
+      // User cancelled — remove from all driver queues
+      driverQueue.removeTripFromAllDrivers(tripId);
+      offerManager.clearAllOffersForTrip(io, tripId);
+
+      io.to(connectionManager.tripRoom(tripId)).emit(EVENTS.TRIP_CANCELLED, {
+        tripId,
+      });
+      io.emit(EVENTS.RIDE_CANCEL_BY_USER, { tripId });
+
+      break;
+    }
+
+    // ── 7 = Cancelled By Driver ─────────────────────────────────────────────
+    case STATUS.CANCELLED_BY_DRIVER: {
+      io.to(connectionManager.tripRoom(tripId)).emit(EVENTS.TRIP_CANCELLED, {
+        tripId,
+      });
+      io.emit(EVENTS.RIDE_CANCEL_BY_DRIVER, { tripId });
+
+      break;
+    }
+
+    // ── 8 = Request Timeout ─────────────────────────────────────────────────
+    case STATUS.REQUEST_TIMEOUT: {
+      // Trip timed out from user side — remove from all driver queues
+      driverQueue.removeTripFromAllDrivers(tripId);
+      offerManager.clearAllOffersForTrip(io, tripId);
+
+      io.emit(EVENTS.RIDE_REVOKED, { tripId });
+
+      break;
+    }
+
+    // ── Unknown ─────────────────────────────────────────────────────────────
     default: {
-      return sendError(res, 400, `Invalid status: ${status}`);
+      return sendError(res, 400, `Invalid status code: ${statusCode}`);
     }
   }
 
